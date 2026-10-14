@@ -1,6 +1,5 @@
 {
   "name": "District Heat Flow Card",
   "filename": "ha-district-heat-flow-card.js",
-  "content_in_root": true,
   "render_readme": true
 }

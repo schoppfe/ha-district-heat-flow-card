@@ -1,0 +1,14 @@
+{
+  "name": "ha-district-heat-flow-card",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --format=esm --target=es2021 --legal-comments=none --outfile=dist/ha-district-heat-flow-card.js",
+    "check": "node --check dist/ha-district-heat-flow-card.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
