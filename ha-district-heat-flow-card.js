@@ -1,0 +1,190 @@
+const EDITOR_GROUPS = [["Fernwärme", [["primary_supply_temperature", "Vorlauf"], ["primary_return_temperature", "Gemeinsamer Rücklauf"], ["primary_flow", "Gesamtvolumenstrom"], ["primary_power", "Gesamtwärmeleistung"]]], ["Warmwasserspeicher", [["storage_temperature", "Speichertemperatur"], ["dhw_primary_return_temperature", "Rücklauf Speicherregister"], ["dhw_primary_flow", "Volumenstrom Speicherregister"], ["dhw_power", "Wärmeleistung Speicherregister"]]], ["Heizung", [["heating_primary_return_temperature", "Rücklauf primär"], ["heating_secondary_supply_temperature", "Vorlauf sekundär"], ["heating_secondary_return_temperature", "Rücklauf sekundär"], ["heating_primary_flow", "Volumenstrom primär"], ["heating_power", "Wärmeleistung primär"]]], ["Pumpe und Umgebung", [["heating_pump", "Heizungspumpe"], ["heating_pump_power", "Elektrische Pumpenleistung"], ["outdoor_temperature", "Außentemperatur"]]]];
+/* District Heat Flow Card 0.5.0 — no dependencies, no service calls. */
+class DistrictHeatFlowCard extends HTMLElement {
+  constructor() { super(); this.attachShadow({mode: 'open'}); }
+  setConfig(config) {
+    if (!config || !config.entities || Array.isArray(config.entities) || typeof config.entities !== 'object') throw new Error('entities muss eine Zuordnung von Sensoren sein.');
+    for (const value of Object.values(config.entities)) if (typeof value !== 'string') throw new Error('Entity-IDs müssen Zeichenketten sein.');
+    this._config = {title: 'Fernwärme', pump_power_threshold: 0.5, ...config};
+    this._signature = null; this._render();
+  }
+  set hass(value) {
+    this._hass = value;
+    if (!this._config) return;
+    const signature = JSON.stringify([value?.locale?.language, Object.values(this._config.entities).map(id => [value?.states?.[id]?.state, value?.states?.[id]?.attributes?.unit_of_measurement])]);
+    if (signature !== this._signature) { this._signature = signature; this._render(); }
+  }
+  getCardSize() { return 8; }
+  getGridOptions() { return {columns: 'full'}; }
+  static getStubConfig() {
+    return {title: 'Fernwärme', entities: Object.fromEntries(EDITOR_GROUPS.flatMap(([,fields])=>fields.map(([key])=>[key,''])))};
+  }
+  static async getConfigElement() {
+    // Load HA's form components through a built-in editor when necessary.
+    if (!customElements.get('ha-form') && window.loadCardHelpers) {
+      const helpers = await window.loadCardHelpers();
+      const card = await helpers.createCardElement({type:'entities',entities:[]});
+      if (card.constructor.getConfigElement) await card.constructor.getConfigElement();
+    }
+    return document.createElement('ha-district-heat-flow-card-editor');
+  }
+
+  _escape(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  _state(key) { return this._hass?.states?.[this._config.entities[key]]; }
+  _number(key) { const s = this._state(key)?.state; return s != null && s.trim() !== '' && Number.isFinite(Number(s)) ? Number(s) : null; }
+  _pumpState() {
+    const state = this._state('heating_pump')?.state;
+    // An explicit switch state takes precedence over a delayed power reading.
+    if (state === 'on') return 'on';
+    if (state === 'off') return 'off';
+    let power = this._number('heating_pump_power');
+    if (power === null) return 'unknown';
+    if (this._state('heating_pump_power')?.attributes?.unit_of_measurement === 'kW') power *= 1000;
+    return power > this._config.pump_power_threshold ? 'on' : 'off';
+  }
+  _reading(key, fallback, precision) {
+    const value = this._number(key);
+    const unit = this._state(key)?.attributes?.unit_of_measurement || fallback;
+    const digits = precision ?? ({'°C':1, '°F':1, 'kW':2, 'W':0, 'l/h':0, 'L/h':0, 'm³/h':3, 'm3/h':3}[unit] ?? 1);
+    let formatted = '–';
+    if (value !== null) {
+      try { formatted = new Intl.NumberFormat(this._hass?.locale?.language || 'de-DE', {minimumFractionDigits:digits, maximumFractionDigits:digits}).format(value); }
+      catch { formatted = value.toFixed(digits); }
+    }
+    return {value: this._escape(formatted), unit: this._escape(unit)};
+  }
+  _attrs(key, label) {
+    const id = this._config.entities[key];
+    return id ? `data-entity="${this._escape(id)}" role="button" tabindex="0" aria-label="${this._escape(label)}"` : '';
+  }
+  _display(x,y,key,unit,label,width=138) {
+    const r = this._reading(key,unit);
+    return `<g class="display" ${this._attrs(key,label)}><title>${this._escape(label)}</title>
+      <rect class="bezel" x="${x-width/2}" y="${y-24}" width="${width}" height="48" rx="7"/>
+      <rect class="screen" x="${x-width/2+5}" y="${y-19}" width="${width-10}" height="38" rx="4"/>
+      <text x="${x}" y="${y+8}" text-anchor="middle" class="reading">${r.value}<tspan class="unit" dx="5">${r.unit}</tspan></text></g>`;
+  }
+  _value(x,y,key,unit,label,anchor='start') {
+    const r=this._reading(key,unit);
+    return `<text x="${x}" y="${y}" text-anchor="${anchor}" class="value" ${this._attrs(key,label)}><title>${this._escape(label)}</title>${r.value} ${r.unit}</text>`;
+  }
+  _render() {
+    if (!this._config) return;
+    const pump = this._pumpState();
+    const pipe = (d, cold=false, thin=false) => `<path d="${d}" class="pipe ${cold?'cold':'hot'} ${thin?'thin':''}"/>`;
+    this.shadowRoot.innerHTML = `<style>
+      :host{display:block} ha-card{display:block;overflow:hidden;background:var(--ha-card-background,var(--card-background-color,#fff));color:var(--primary-text-color,#293c49)}
+      .viewport{overflow-x:auto} svg{display:block;width:100%;height:auto;min-width:780px;font-family:var(--paper-font-body1_-_font-family,Arial,sans-serif)}
+      text{fill:var(--primary-text-color,#293c49)} .title{font-size:28px;font-weight:600}.value{font-size:24px;font-weight:600}.label{font-size:18px;fill:var(--secondary-text-color,#7a8b97)}
+      .pipe{fill:none;stroke-width:4;stroke-linecap:round;stroke-linejoin:round}.hot{stroke:#d47760}.cold{stroke:#6799b7}.thin{stroke-width:3}
+      .component{fill:var(--card-background-color,#fafcfd);stroke:var(--divider-color,#b9c7d1);stroke-width:2}.separator{stroke:var(--divider-color,#c3cfd7);stroke-width:2;fill:none}
+      .bezel{fill:var(--card-background-color,#fff);stroke:var(--divider-color,#cbd5dc);stroke-width:1.5}.screen{fill:var(--secondary-background-color,#f0f5f6)}
+      .reading{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}.unit{font-size:15px;font-weight:400;fill:var(--secondary-text-color,#6d808c)}
+      [data-entity]{cursor:pointer}[data-entity]:hover{filter:brightness(.9)}[data-entity]:focus-visible{outline:2px solid var(--primary-color,#1686ba);outline-offset:4px}
+      .rotor{fill:#9eb8c8;transform-box:fill-box;transform-origin:center}.on .rotor{animation:rotate 3s linear infinite}.pump-ring{fill:var(--card-background-color,#fff);stroke:#d47760;stroke-width:2.5}
+      .branch-value{font-size:17px;font-weight:400;fill:var(--secondary-text-color,#738894)} .pump-power{font-size:18px;font-weight:400;fill:var(--secondary-text-color,#738894)} .unknown-mark{font-size:20px;font-weight:600;fill:var(--secondary-text-color,#738894)}
+      @keyframes rotate{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.on .rotor{animation:none}}
+    </style><ha-card><div class="viewport"><svg xmlns="http://www.w3.org/2000/svg" viewBox="24 24 1552 780" aria-label="Fernwärmeanschluss mit parallel angeschlossenem Speicherregister und Heizungswärmetauscher">
+      <text x="80" y="83" class="title">${this._escape(this._config.title)}</text>
+      ${this._value(80,121,'primary_power','kW','Gesamte Wärmeleistung')}
+      ${this._value(250,121,'primary_flow','l/h','Gesamter Fernwärmevolumenstrom')}
+      <text x="1495" y="78" class="label" text-anchor="end">Außen</text>
+      ${this._value(1495,115,'outdoor_temperature','°C','Außentemperatur','end')}
+      <path d="M80 151 H1520" class="separator"/>
+      ${pipe('M80 220 H790 V370')}${pipe('M420 220 V330')}
+      ${pipe('M790 510 V660 H80',true)}${pipe('M420 550 V660',true)}
+      <circle cx="420" cy="220" r="5" fill="#d47760"/><circle cx="420" cy="660" r="5" fill="#6799b7"/>
+      <rect x="335" y="330" width="170" height="220" rx="29" class="component"/>
+      <path d="M350 347 Q420 333 490 347" class="separator"/>
+      ${pipe('M420 330 V348 H352 V418 H459 Q481 418 481 432 Q481 446 459 446 H381 Q359 446 359 460 Q359 474 381 474 H459 Q481 474 481 488 Q481 502 459 502 H420 V550',false,true)}
+      <rect x="745" y="370" width="310" height="140" rx="12" class="component"/>
+      ${pipe('M790 370 V386 L773 400 L795 416 L773 432 L795 448 L773 464 L790 480 V510',false,true)}
+      ${pipe('M1010 370 V386 L1027 400 L1005 416 L1027 432 L1005 448 L1027 464 L1010 480 V510',true,true)}
+      ${[841,861,881,901,921,941,961].map(x=>`<path d="M${x+12} 392 L${x-9} 488" class="separator"/>`).join('')}
+      ${pipe('M1010 370 V220 H1400 V375')}${pipe('M1400 505 V660 H1010 V510',true)}
+      <rect x="1340" y="375" width="120" height="130" rx="9" class="component"/>
+      ${[1357,1375,1393,1411,1429,1447].map(x=>`<path d="M${x} 392 V488" stroke="#b3c4d0" stroke-width="5" stroke-linecap="round"/>`).join('')}
+      <g class="pump ${pump}" ${this._attrs('heating_pump','Heizungspumpe')}><title>Heizungspumpe: ${pump==='on'?'Ein':pump==='off'?'Aus':'unbekannt'}</title>
+        <circle cx="1220" cy="220" r="27" class="pump-ring"/>
+        <g class="rotor">${[0,90,180,270].map(a=>`<path d="M1220 215 C1204 199 1200 212 1203 222 Q1210 228 1220 220 Z" transform="rotate(${a} 1220 220)"/>`).join('')}</g>
+        <circle cx="1220" cy="220" r="5" fill="#536977"/>
+        ${pump==='unknown'?'<text x="1260" y="227" class="unknown-mark">?</text>':''}
+      </g>
+      ${this._value(1220,180,'heating_pump_power','W','Elektrische Pumpenleistung','middle').replace('class="value"','class="pump-power"')}
+      ${this._display(175,220,'primary_supply_temperature','°C','Fernwärme-Vorlauf')}
+      ${this._display(175,660,'primary_return_temperature','°C','Gemischter Fernwärme-Rücklauf')}
+      ${this._display(420,382,'storage_temperature','°C','Speichertemperatur')}
+      ${this._display(420,285,'primary_supply_temperature','°C','Vorlauf Speicherregister – gemeinsamer Fernwärme-Vorlauf')}
+      ${this._display(790,285,'primary_supply_temperature','°C','Vorlauf Heizung primär – gemeinsamer Fernwärme-Vorlauf')}
+      ${this._display(1010,285,'heating_secondary_supply_temperature','°C','Vorlauf Heizung sekundär')}
+      ${this._display(420,595,'dhw_primary_return_temperature','°C','Rücklauf Speicherregister')}
+      ${this._display(790,595,'heating_primary_return_temperature','°C','Rücklauf Heizung primär')}
+      ${this._display(1010,595,'heating_secondary_return_temperature','°C','Rücklauf Heizung sekundär')}
+      ${this._value(505,322,'dhw_primary_flow','l/h','Volumenstrom Speicherregister').replace('class="value"','class="branch-value"')}
+      ${this._value(875,322,'heating_primary_flow','l/h','Volumenstrom Heizung primär').replace('class="value"','class="branch-value"')}
+      <text x="420" y="717" class="label" text-anchor="middle">Warmwasser</text>
+      ${this._value(420,753,'dhw_power','kW','Wärmeleistung Speicherregister','middle')}
+      <text x="900" y="717" class="label" text-anchor="middle">Wärmetauscher</text>
+      ${this._value(900,753,'heating_power','kW','Wärmeleistung Heizung primär','middle')}
+      <text x="1400" y="717" class="label" text-anchor="middle">Heizung</text>
+    </svg></div></ha-card>`;
+    this.shadowRoot.querySelectorAll('[data-entity]').forEach(element => {
+      const open = () => this.dispatchEvent(new CustomEvent('hass-more-info',{detail:{entityId:element.dataset.entity},bubbles:true,composed:true}));
+      element.addEventListener('click',open);
+      element.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();open();}});
+    });
+  }
+}
+if (!customElements.get('ha-district-heat-flow-card')) customElements.define('ha-district-heat-flow-card',DistrictHeatFlowCard);
+window.customCards=window.customCards||[];
+if (!window.customCards.some(card=>card.type==='ha-district-heat-flow-card')) window.customCards.push({type:'ha-district-heat-flow-card',name:'District Heat Flow Card',description:'Fernwärme, Speicher und Heizung als interaktives Hydraulikschema',preview:true});
+console.info('DISTRICT-HEAT-FLOW-CARD v0.5.0');
+
+class DistrictHeatFlowCardEditor extends HTMLElement {
+  constructor() { super(); this.attachShadow({mode:'open'}); this._forms=[]; }
+  setConfig(config) {
+    this._config={...config,entities:{...(config.entities||{})}};
+    this._render();
+  }
+  set hass(value) { this._hass=value; this._render(); }
+  _render() {
+    if (!this._config || !this._hass) return;
+    if (!this._forms.length) {
+      this.shadowRoot.innerHTML=`<style>
+        :host{display:block}section{margin:16px 0 24px}h3{font-size:16px;font-weight:500;margin:0 0 12px}
+        p{color:var(--secondary-text-color);line-height:1.5;font-size:14px}
+      </style><p>Ordne jedem Display eine Entität zu. Leere Felder zeigen „–“. Zweigvolumenströme und Wärmeleistungen sind optional und werden nicht von der Karte berechnet.</p>`;
+      this._addForm('Allgemein',[{name:'title',selector:{text:{}}}],false,{title:'Kartentitel'});
+      for (const [title,fields] of EDITOR_GROUPS) {
+        const schema=fields.map(([name])=>({name,selector:{entity:{domain:name==='heating_pump'?['switch','input_boolean','binary_sensor','fan','sensor']:['sensor','input_number']}}}));
+        this._addForm(title,schema,true,Object.fromEntries(fields));
+      }
+    }
+    for (const {form,entityGroup,schema} of this._forms) {
+      form.hass=this._hass;
+      const source=entityGroup?this._config.entities:this._config;
+      form.data=Object.fromEntries(schema.map(({name})=>[name,source[name]||'']));
+    }
+  }
+  _addForm(title,schema,entityGroup,labels) {
+    const section=document.createElement('section');
+    const heading=document.createElement('h3');heading.textContent=title;
+    const form=document.createElement('ha-form');
+    form.schema=schema;form.computeLabel=field=>labels[field.name]||field.name;
+    form.addEventListener('value-changed',event=>{
+      event.stopPropagation();
+      const data=event.detail?.value;
+      if (!data || !this._config) return;
+      const updated={...this._config,entities:{...this._config.entities}};
+      const target=entityGroup?updated.entities:updated;
+      // Keep all fields in the template; clearing a selector stores an empty string.
+      // Preserve YAML-only settings and other groups without mutating HA's object.
+      for (const {name} of schema) if (Object.prototype.hasOwnProperty.call(data,name)) target[name]=data[name]??'';
+      this._config=updated;
+      this.dispatchEvent(new CustomEvent('config-changed',{detail:{config:updated},bubbles:true,composed:true}));
+    });
+    section.append(heading,form);this.shadowRoot.append(section);
+    this._forms.push({form,entityGroup,schema});
+  }
+}
+if (!customElements.get('ha-district-heat-flow-card-editor')) customElements.define('ha-district-heat-flow-card-editor',DistrictHeatFlowCardEditor);
