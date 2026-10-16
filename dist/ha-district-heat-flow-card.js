@@ -347,7 +347,7 @@ var DistrictHeatFlowCard = class extends HTMLElement {
 };
 
 // package.json
-var version = "0.6.0";
+var version = "0.6.0-alpha.1";
 
 // src/index.js
 if (!customElements.get("ha-district-heat-flow-card")) {
